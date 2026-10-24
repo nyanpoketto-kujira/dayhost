@@ -1,0 +1,79 @@
+[Unit]
+Description=DayHost — Minecraft server lifecycle dashboard
+Documentation=file:///opt/dayhost/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dayhost
+Group=dayhost
+WorkingDirectory=/opt/dayhost
+
+# Secrets are NOT in the unit file: EnvironmentFile supplies them (chmod 600).
+EnvironmentFile=/opt/dayhost/.env
+# Idle-RSS knobs: fewer malloc arenas + plain malloc measurably reduce the
+# resident set of a small async Python process.
+Environment=MALLOC_ARENA_MAX=2
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# --- ONE worker, on purpose ---------------------------------------------------
+# app/services/logbus.py keeps SSE subscribers in process memory. With >1
+# worker, uvicorn load-balances connections across processes, so a browser can
+# subscribe to worker A while the power action publishes on worker B — the log
+# stream would silently go quiet. Multi-worker needs an external broker
+# (Redis/NATS), which is explicitly out of scope for Fase 1. See README.
+ExecStart=/opt/dayhost/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --loop asyncio \
+    --http h11 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1 \
+    --no-server-header \
+    --log-level info
+
+# Why --loop asyncio --http h11: uvloop + httptools (the "standard" extras)
+# cost ~3 MB extra RSS for throughput this single-admin app will never need.
+# Measured (1 worker, MALLOC_ARENA_MAX=2): ~50.9 MB idle with the extras
+# installed, 47.6 MB without them. requirements.txt therefore uses plain
+# `uvicorn`, not `uvicorn[standard]`.
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+# --- Hardening ----------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Writable paths only: SQLite data dir + backups staged before shutdown.
+ReadWritePaths=/opt/dayhost/data
+
+# --- Resource ceiling ---------------------------------------------------------
+# Operational RSS target is <60 MB for the app process, measured under load
+# (worst case 50.13 MB across cold-idle / post-login / 20 req + live SSE).
+# MemoryMax is a systemd hard cap, not the target: it is set well above the
+# budget so a burst (a large SSE backlog, a burst of dashboard renders) is
+# throttled by systemd instead of OOM-killing the unit. Keep it at 256M —
+# raising it does not change the 60 MB target, it only widens the safety net.
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

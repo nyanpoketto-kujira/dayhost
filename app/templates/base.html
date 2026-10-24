@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ title|default("DayHost") }}{% endblock %}</title>
+  <!-- Tailwind (CDN, zero build) + Lucide icons -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class', theme: { extend: { colors: { ink: '#0b0f14' } } } };
+  </script>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <link rel="stylesheet" href="/static/css/app.css">
+  {% block head %}{% endblock %}
+</head>
+<body class="min-h-screen bg-ink text-slate-200 antialiased">
+  <div class="mx-auto max-w-6xl px-4 py-6">
+    <header class="mb-6 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <i data-lucide="server" class="h-6 w-6 text-emerald-400"></i>
+        <h1 class="text-xl font-semibold tracking-tight">DayHost</h1>
+        <span class="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400">Fase 2</span>
+      </div>
+      {% block header_right %}
+      <div class="flex items-center gap-3 text-sm">
+        {% if username %}
+          <span class="text-slate-400">{{ username }}</span>
+          <form method="post" action="/logout">
+            <button class="rounded border border-slate-700 px-3 py-1 hover:bg-slate-800">Sign out</button>
+          </form>
+        {% endif %}
+      </div>
+      {% endblock %}
+    </header>
+
+    {% block content %}{% endblock %}
+
+    <footer class="mt-10 border-t border-slate-800 pt-4 text-xs text-slate-500">
+      DayHost Fase 2 · tunnel lifecycle is managed by the operator (out of scope)
+    </footer>
+  </div>
+
+  <script>lucide.createIcons();</script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

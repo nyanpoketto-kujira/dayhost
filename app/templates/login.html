@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ title|default("Sign in") }} · DayHost{% endblock %}
+{% block header_right %}{% endblock %}
+{% block content %}
+<div class="mx-auto mt-16 max-w-sm rounded-xl border border-slate-800 bg-slate-900/60 p-6">
+  <h2 class="mb-1 flex items-center gap-2 text-lg font-semibold">
+    <i data-lucide="lock" class="h-5 w-5 text-emerald-400"></i> Sign in
+  </h2>
+  <p class="mb-5 text-xs text-slate-500">DayHost admin console</p>
+
+  {% if not auth_configured %}
+    <div class="mb-4 rounded-lg border border-amber-700/50 bg-amber-900/20 p-3 text-xs text-amber-300">
+      Auth is not configured. Set <code>ADMIN_PASSWORD_HASH</code> and
+      <code>SESSION_SECRET</code> in <code>.env</code>.<br>
+      Generate the hash with:
+      <code class="block mt-1">python scripts/hash_password.py 'your-password'</code>
+    </div>
+  {% endif %}
+
+  {% if error %}
+    <div class="mb-4 rounded-lg border border-red-700/50 bg-red-900/20 p-3 text-xs text-red-300">
+      {{ error }}
+    </div>
+  {% endif %}
+
+  <form method="post" action="/login" class="space-y-3">
+    <input name="username" placeholder="Username" autocomplete="username"
+           class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-emerald-500">
+    <input name="password" type="password" placeholder="Password" autocomplete="current-password"
+           class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-emerald-500">
+    <button class="w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+      Sign in
+    </button>
+  </form>
+</div>
+{% endblock %}

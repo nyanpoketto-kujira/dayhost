@@ -1,0 +1,120 @@
+{# Status cards fragment.
+   HTMX note: the spec'd `hx-timeout` is not a real HTMX attribute — the
+   supported form is `hx-request='{"timeout": 45000}'`. A Daytona lifecycle call
+   can block for up to ~45s worst case, so every power button gets 45s and a
+   spinner via htmx-indicator. #}
+<div id="status-cards"
+     class="grid gap-4 md:grid-cols-3 contents"
+     hx-get="/partials/status"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     hx-request='{"timeout": 45000}'>
+
+  <!-- Sandbox / power -->
+  <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+    <div class="flex items-center justify-between">
+      <h3 class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+        <i data-lucide="box" class="h-4 w-4"></i> Sandbox
+      </h3>
+      {% set st = status.daytona.state %}
+      <span class="rounded-full px-2 py-0.5 text-xs
+        {% if st == 'RUNNING' %}bg-emerald-900/50 text-emerald-300
+        {% elif st == 'STARTING' %}bg-amber-900/50 text-amber-300
+        {% elif st == 'BUSY' %}bg-sky-900/50 text-sky-300
+        {% elif st in ['STOPPING'] %}bg-orange-900/50 text-orange-300
+        {% elif st == 'ARCHIVED' %}bg-indigo-900/50 text-indigo-300
+        {% elif st == 'STOPPED' %}bg-slate-800 text-slate-400
+        {% elif st == 'ERROR' %}bg-red-900/50 text-red-300
+        {% else %}bg-slate-800 text-slate-500{% endif %}">{{ st }}</span>
+    </div>
+
+    <p class="mt-3 text-2xl font-semibold">
+      {% if status.sandbox_live %}Online
+      {% elif status.sandbox_busy %}Transitioning
+      {% elif st == 'ERROR' %}Faulted
+      {% elif st == 'ARCHIVED' %}Archived
+      {% else %}Offline{% endif %}
+    </p>
+    <p class="mt-1 text-xs text-slate-500">
+      {% if status.daytona.configured %}Daytona configured
+      {% else %}Daytona not configured{% endif %}
+      {% if status.daytona.error %}<br><span class="text-amber-400">{{ status.daytona.error }}</span>{% endif %}
+      {% if status.sandbox_desired_state %}<br><span class="text-slate-600">desired: {{ status.sandbox_desired_state }}</span>{% endif %}
+    </p>
+
+    {# errorReason is far more useful than a bare "Error" — surface it verbatim. #}
+    {% if st == 'ERROR' %}
+      <div class="mt-1 rounded-lg border border-red-900/60 bg-red-950/40 p-2 text-xs text-red-300">
+        <span class="font-semibold">Reason:</span>
+        {{ status.sandbox_error_reason or "not reported by Daytona" }}
+      </div>
+    {% endif %}
+    {% if status.sandbox_recoverable %}
+      <p class="mt-1 text-xs text-amber-400">Daytona reports this sandbox as recoverable.</p>
+    {% endif %}
+
+    <div class="mt-4 flex flex-wrap gap-2">
+      <button hx-post="/power/on" hx-target="#status-cards" hx-swap="outerHTML"
+              hx-request='{"timeout": 45000}' hx-disabled-elt="this"
+              class="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50">
+        ⏻ Power ON
+      </button>
+      <button hx-post="/power/off" hx-target="#status-cards" hx-swap="outerHTML"
+              hx-request='{"timeout": 45000}' hx-disabled-elt="this"
+              class="rounded-lg bg-red-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-600 disabled:opacity-50">
+        ⏻ Power OFF
+      </button>
+      <button hx-post="/power/restart" hx-target="#status-cards" hx-swap="outerHTML"
+              hx-request='{"timeout": 45000}' hx-disabled-elt="this"
+              class="rounded-lg bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600 disabled:opacity-50">
+        ♻ Restart
+      </button>
+      {% if st == 'ERROR' and status.sandbox_recoverable %}
+      <button hx-post="/power/recover" hx-target="#status-cards" hx-swap="outerHTML"
+              hx-request='{"timeout": 45000}' hx-disabled-elt="this"
+              class="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-500 disabled:opacity-50">
+        ⚕ Recover
+      </button>
+      {% endif %}
+      <span class="htmx-indicator ml-1 self-center text-xs text-slate-500">working…</span>
+    </div>
+  </div>
+
+  <!-- Ping -->
+  <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+    <h3 class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+      <i data-lucide="activity" class="h-4 w-4"></i> Ping
+    </h3>
+    <p class="mt-3 text-2xl font-semibold {% if status.ping.online %}text-emerald-400{% else %}text-slate-500{% endif %}">
+      {% if status.ping.online %}{{ status.ping.latency_ms }} ms{% else %}—{% endif %}
+    </p>
+    <p class="mt-1 text-xs text-slate-500">
+      {{ status.mc_endpoint }}<br>
+      {% if status.ping.online %}MOTD: {{ status.ping.motd or "—" }}{% else %}{{ status.ping.error or "no response" }}{% endif %}
+    </p>
+    <p class="mt-3 text-xs text-slate-500">
+      Tunnel: {% if status.tunnel.socket_open %}<span class="text-emerald-400">socket open</span>
+      {% else %}<span class="text-red-400">socket closed</span>{% endif %}
+      ({{ status.tunnel.mode }})
+    </p>
+  </div>
+
+  <!-- Players -->
+  <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+    <h3 class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+      <i data-lucide="users" class="h-4 w-4"></i> Players
+    </h3>
+    <p class="mt-3 text-2xl font-semibold">
+      {% if status.ping.players_online is not none %}
+        {{ status.ping.players_online }}<span class="text-sm text-slate-500"> / {{ status.ping.players_max }}</span>
+      {% else %}—{% endif %}
+    </p>
+    <p class="mt-1 text-xs text-slate-500">
+      Version: {{ status.ping.version or "unknown" }}<br>
+      Public: {{ status.public_endpoint or "not set" }}
+    </p>
+    {% if status.ping.sample %}
+      <p class="mt-2 text-xs text-slate-500">{{ status.ping.sample|join(", ") }}</p>
+    {% endif %}
+  </div>
+</div>

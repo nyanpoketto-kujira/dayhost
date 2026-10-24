@@ -1,0 +1,25 @@
+# DayHost — runtime dependencies (Fase 1)
+# Plain pip format on purpose: portable, works with `uv pip install -r`,
+# `pip install -r`, and any distro packaging. Pin major versions only.
+#
+# Deliberately NOT included:
+#   * mcstatus        -> replaced by hand-rolled SLP ping (app/services/mcping.py)
+#   * pydantic-settings -> replaced by python-dotenv + dataclass(frozen=True)
+#   * passlib/bcrypt  -> replaced by hashlib.pbkdf2_hmac (scripts/hash_password.py)
+#   * sqlalchemy/alembic/celery/redis -> raw aiosqlite + in-process asyncio
+#   * uvicorn[standard] -> pulls uvloop + httptools + watchfiles + websockets
+#     + pyyaml, none of which we use: the unit pins --loop asyncio --http h11
+#     (so uvloop/httptools are dead weight in RSS), SSE is not websocket, and
+#     --proxy-headers gives us the forwarded-IP handling we need. Plain
+#     `uvicorn` it is. Dev `--reload` still works via stdlib StatReload; only
+#     install `uvicorn[standard]` yourself if you want watchfiles-speed reload.
+#
+# NOTE: pydantic still arrives as a transitive dependency of FastAPI. That is
+# unavoidable and is the main fixed cost in the idle-RSS budget.
+fastapi==0.115.*
+uvicorn==0.32.*
+jinja2==3.1.*
+python-multipart==0.0.12
+aiosqlite==0.20.*
+httpx==0.27.*
+python-dotenv==1.0.*

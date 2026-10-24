@@ -1,0 +1,36 @@
+/* DayHost — minimal local styles. Tailwind comes from the CDN (zero build). */
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(16, 185, 129, 0.08), transparent 60%),
+    #0b0f14;
+}
+
+/* htmx loading indicator: hidden unless a request is in flight */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 150ms ease-in;
+}
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+#console-log {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Thin scrollbars in the log pane */
+#console-log::-webkit-scrollbar {
+  width: 8px;
+}
+#console-log::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.4);
+  border-radius: 4px;
+}
