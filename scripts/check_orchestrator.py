@@ -1162,13 +1162,16 @@ async def suite_agent_env(tmp: Path) -> int:
             if value is not None:
                 os.environ[key] = value
 
-    # An explicit override that drifts from the Phase-B contract is fixed.
-    fixed = Orchestrator._normalise_agent_ws_url("ws://10.0.0.9:9000/ws")  # noqa: SLF001
-    failures += check_eq("explicit CONTROLLER_WS is normalised to :8765/agent-ws",
-                         fixed, "ws://10.0.0.9:8765/ws/agent-ws")
+    # A proxied wss URL must survive untouched: forcing :8765 made every
+    # sandbox dial an unreachable port (Phase E live failure).
     keep = Orchestrator._normalise_agent_ws_url("wss://h.example/agent-ws")  # noqa: SLF001
-    failures += check_eq("a canonical wss URL is left untouched (only :8765 added)",
-                         keep, "wss://h.example:8765/agent-ws")
+    failures += check_eq("wss URL keeps no forced port (edge terminates TLS)",
+                         keep, "wss://h.example/agent-ws")
+    explicit = Orchestrator._normalise_agent_ws_url("ws://10.0.0.9:9000/ws")  # noqa: SLF001
+    failures += check_eq("explicit port is preserved, path fixed",
+                         explicit, "ws://10.0.0.9:9000/ws/agent-ws")
+    plain = Orchestrator._normalise_agent_ws_url("ws://10.0.0.9/agent-ws")  # noqa: SLF001
+    failures += check_eq("absent port stays absent", plain, "ws://10.0.0.9/agent-ws")
     return failures
 
 

@@ -540,16 +540,19 @@ class Orchestrator:
             scheme = "wss" if str(getattr(self.settings, "orch_agent_ws_tls", "")).lower() in (
                 "1", "true", "yes", "on",
             ) else "ws"
-            host = str(getattr(self.settings, "agent_ws_public_host", "") or "").strip()
-            if not host:
-                host = str(getattr(self.settings, "agent_ws_host", "127.0.0.1"))
+            public = str(getattr(self.settings, "agent_ws_public_host", "") or "").strip()
             port = int(getattr(self.settings, "agent_ws_port", 8765))
             path = str(getattr(self.settings, "agent_ws_path", "/agent-ws"))
-            url = f"{scheme}://{host}:{port}/{path.lstrip('/')}"
+            if public:
+                # Public host implies an edge proxy that owns the port mapping.
+                netloc = public
+            else:
+                host = str(getattr(self.settings, "agent_ws_host", "127.0.0.1"))
+                netloc = f"{host}:{port}"
+            url = f"{scheme}://{netloc}/{path.lstrip('/')}"
         else:
-            # Phase-B contract: the agent dials ``:8765/agent-ws``. An explicit
-            # override that drifts from it is normalised (not silently kept),
-            # otherwise the sandbox connects to nothing and every step times out.
+            # Only the path is contractual: the scheme/host/port belong to the
+            # deployment. Forcing ``:8765`` broke every proxied sandbox dial.
             url = self._normalise_agent_ws_url(url)
 
         frp_enabled = str(getattr(self.settings, "tunnel_mode", "frp") or "frp").lower() == "frp"
@@ -604,29 +607,30 @@ class Orchestrator:
 
     @staticmethod
     def _normalise_agent_ws_url(url: str) -> str:
-        """Force ``<scheme>://<host>:8765/.../agent-ws`` (Phase-B contract)."""
+        """Keep scheme/host/explicit port; only guarantee the /agent-ws path.
+
+        The old contract forced port 8765. That is right for a loopback dev
+        box and wrong for every proxied deployment: TLS terminates on 443 at
+        the edge, so :8765 is unreachable from a sandbox. Agent-side default
+        (443 for wss, 80 for ws) handles an absent port correctly.
+        """
         parsed = urlsplit(url)
         scheme = parsed.scheme.lower()
         if scheme not in ("ws", "wss"):
             scheme = "ws"
         host = parsed.hostname or "127.0.0.1"
-        if parsed.port not in (None, 8765):
-            log.warning(
-                "orch_agent_ws_url: port %s -> 8765 (kontrak Phase B)", parsed.port
-            )
-        port = 8765
         path = parsed.path or ""
         if not path.rstrip("/").endswith("/agent-ws"):
             original = path or "/"
-            new_path = (path.rstrip("/") or "") + "/agent-ws"
+            path = (path.rstrip("/") or "") + "/agent-ws"
             log.warning(
-                "orch_agent_ws_url: path %r -> %r (kontrak Phase B)",
-                original,
-                new_path,
+                "orch_agent_ws_url: path %r -> %r (kontrak /agent-ws)",
+                original, path,
             )
-            path = new_path
         netloc = f"[{host}]" if ":" in host else host
-        return urlunsplit((scheme, f"{netloc}:{port}", path, "", ""))
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((scheme, netloc, path, "", ""))
 
     # ---- step 4 -----------------------------------------------------------
     async def _step_ensure_agent(self) -> dict[str, Any]:
