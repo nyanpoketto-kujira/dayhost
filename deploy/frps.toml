@@ -1,0 +1,30 @@
+# frps — control plane for the Minecraft tunnel.
+#
+# The VPS sits behind the hoster's NAT: public port 44052 is forwarded to
+# 10.0.11.60:44052, and 34212 to 10.0.11.60:34212. frps therefore binds
+# 0.0.0.0 (the default), never 127.0.0.1 — the packer connects through NAT,
+# not over loopback.
+
+bindAddr = "0.0.0.0"
+bindPort = 44052
+
+# Only the Minecraft proxy port leaves the sandbox. Narrow allowPorts means a
+# leaked FRP_TOKEN cannot turn this box into an arbitrary public relay.
+allowPorts = [{ start = 34212, end = 34212 }]
+
+auth.method = "token"
+auth.token = "REPLACE_WITH_FRP_TOKEN"
+
+# TCP only: the Virtuzo rule forwards TCP, and Minecraft Java is TCP.
+transport.maxPoolCount = 5
+transport.tcpMux = true
+
+transport.heartbeatTimeout = 30
+
+log.to = "console"
+log.level = "info"
+log.maxDays = 7
+
+# Dashboard/admin API stays on loopback; nothing needs it from outside.
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
