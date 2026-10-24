@@ -3,6 +3,16 @@
 
 {% include "partials/status.html" %}
 
+{# Fusion Phase D: orchestrator panel. Two independent cards, each with its own
+   HTMX poll; the named `state` SSE event (panel.js) refreshes both. #}
+<section class="mt-6 grid gap-4 lg:grid-cols-2">
+  {% include "partials/host.html" %}
+  {% include "partials/agent.html" %}
+</section>
+<p class="mt-1 text-xs text-slate-600">
+  panel live: <span id="panel-sse-state">connecting…</span>
+</p>
+
 <section class="mt-6 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
   <div class="mb-3 flex items-center justify-between">
     <h2 class="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
@@ -34,4 +44,5 @@
 
 {% block scripts %}
 <script src="/static/js/console.js"></script>
+<script src="/static/js/panel.js"></script>
 {% endblock %}

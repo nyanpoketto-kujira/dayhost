@@ -1,0 +1,97 @@
+{# Orchestrator host card — Fusion Phase D.
+   Refresh: htmx every 5s + the named `state` SSE event (see panel.js).
+   Every branch prints an explicit label; an empty cell would be a bug. #}
+<div id="host-card" class="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
+     hx-get="/partials/host" hx-trigger="every 5s" hx-swap="outerHTML">
+
+  <div class="flex items-center justify-between">
+    <h3 class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+      <i data-lucide="server-cog" class="h-4 w-4"></i> Orchestrator host
+    </h3>
+    {% if host.available %}
+      {% set sb = host.state.sandbox_state %}
+      <span class="rounded-full px-2 py-0.5 text-xs
+        {% if sb == 'RUNNING' %}bg-emerald-900/50 text-emerald-300
+        {% elif sb in ['STARTING', 'STOPPING', 'BUSY'] %}bg-amber-900/50 text-amber-300
+        {% elif sb == 'ERROR' %}bg-red-900/50 text-red-300
+        {% else %}bg-slate-800 text-slate-400{% endif %}">{{ sb }}</span>
+    {% else %}
+      <span class="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-400">disabled</span>
+    {% endif %}
+  </div>
+
+  {% if not host.available %}
+    <p class="mt-3 text-sm text-slate-400">Orchestrator disabled.</p>
+    <p class="mt-1 text-xs text-slate-500">
+      ORCH_ENABLED=false{{ (" — " ~ host.reason) if host.reason else "" }}.
+      Power buttons below still use the Daytona API directly.
+    </p>
+  {% else %}
+    {% set st = host.state %}
+    <div class="mt-3 grid grid-cols-2 gap-3 text-xs">
+      <div>
+        <p class="text-slate-500">Sandbox (Daytona)</p>
+        <p class="mt-0.5 text-base font-semibold" id="host-sandbox-state">{{ st.sandbox_state }}</p>
+      </div>
+      <div>
+        <p class="text-slate-500">Minecraft (agent)</p>
+        <p class="mt-0.5 text-base font-semibold" id="host-mc-state">{{ st.mc_state }}</p>
+      </div>
+      <div>
+        <p class="text-slate-500">Agent link</p>
+        <p class="mt-0.5 font-medium
+          {% if st.status == 'online' %}text-emerald-400
+          {% elif st.status == 'recovering' %}text-amber-400{% else %}text-slate-400{% endif %}"
+          id="host-link-status">
+          {{ st.status }}</p>
+      </div>
+      <div>
+        <p class="text-slate-500">Agent WS listener</p>
+        <p class="mt-0.5 font-medium">
+          {% if host.ws.running %}listening{% else %}not listening{% endif %}
+        </p>
+      </div>
+    </div>
+
+    <p class="mt-3 text-xs text-slate-500">
+      sandbox_id: <span class="text-slate-400">{{ st.sandbox_id or "—" }}</span><br>
+      last seen: {% if st.last_seen_ago is not none %}{{ st.last_seen_ago }}s ago{% else %}never{% endif %}
+      · uptime {{ st.controller_uptime }}s
+    </p>
+
+    {% if st.provisioning.active %}
+      <p class="mt-2 rounded-lg border border-sky-900/60 bg-sky-950/40 p-2 text-xs text-sky-300">
+        provisioning: {{ st.provisioning.step }}
+      </p>
+    {% elif st.provisioning.last_error %}
+      <p class="mt-2 rounded-lg border border-red-900/60 bg-red-950/40 p-2 text-xs text-red-300">
+        provisioning gagal: {{ st.provisioning.last_error }}
+      </p>
+    {% endif %}
+    {% if st.recovery.active %}
+      <p class="mt-2 rounded-lg border border-amber-900/60 bg-amber-950/40 p-2 text-xs text-amber-300">
+        recovery aktif (percobaan {{ st.recovery.attempt }}, langkah {{ st.recovery.step }})
+      </p>
+    {% endif %}
+
+    <div class="mt-4 flex flex-wrap gap-2">
+      <button hx-post="/host/start" hx-target="#host-card" hx-swap="outerHTML"
+              hx-request='{"timeout": 200000}' hx-disabled-elt="this"
+              class="rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50">
+        ▶ Start host
+      </button>
+      <button hx-post="/host/stop" hx-target="#host-card" hx-swap="outerHTML"
+              hx-request='{"timeout": 200000}' hx-disabled-elt="this"
+              class="rounded-lg bg-red-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50">
+        ■ Stop host
+      </button>
+      <button hx-post="/backup" hx-target="#backup-result" hx-swap="innerHTML"
+              hx-request='{"timeout": 200000}' hx-disabled-elt="this"
+              class="rounded-lg bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-600 disabled:opacity-50">
+        ⛁ Backup now
+      </button>
+      <span class="htmx-indicator self-center text-xs text-slate-500">working…</span>
+    </div>
+    <div id="backup-result" class="mt-2 text-xs"></div>
+  {% endif %}
+</div>

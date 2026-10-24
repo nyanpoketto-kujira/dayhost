@@ -31,6 +31,12 @@ data/
 logs/
 *.log
 
+# --- Legacy reference material (NOT part of DayHost) --------------------------
+# Kept on disk for historical reference only; quarantined from the repo.
+# DayHost has zero code/import dependency on it (verified by isolation test:
+# all 11 check suites pass with this directory removed).
+mc-orchestrator/
+
 # --- Tooling / editors -------------------------------------------------------
 .pytest_cache/
 .ruff_cache/

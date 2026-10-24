@@ -1,0 +1,11 @@
+{# Result of POST /backup. Always 200: "no world yet" is an answer, not an error. #}
+{% if ok %}
+  <p class="rounded-lg border border-emerald-900/60 bg-emerald-950/40 p-2 text-emerald-300">
+    {{ message }}
+  </p>
+{% else %}
+  <p class="rounded-lg border border-amber-900/60 bg-amber-950/40 p-2 text-amber-300">
+    {{ message }}
+    {% if detail %}<br><span class="text-amber-400/80">{{ detail }}</span>{% endif %}
+  </p>
+{% endif %}

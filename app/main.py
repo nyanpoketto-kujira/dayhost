@@ -33,6 +33,24 @@ _LOG_INFO = setup_logging()
 log = logging.getLogger("dayhost")
 
 
+def build_orchestrator(settings=None):
+    """Wire the real orchestrator, two explicit steps.
+
+    Deliberately *not* ``Orchestrator.from_settings(settings, **hooks)``: the
+    hook wiring stays readable at the call site, and the classmethod stays a
+    general-purpose API (its hook-kwarg regression is fixed separately).
+    A module-level factory also gives the Phase-D harness a seam to inject a
+    fake without touching production code paths.
+    """
+    from .services.agent_ws import AgentWSServer
+    from .services.orchestrator import Orchestrator
+
+    settings = settings or get_settings()
+    orch = Orchestrator(settings)
+    orch.ws = AgentWSServer.from_settings(settings, **orch.hooks())
+    return orch
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -106,10 +124,68 @@ async def lifespan(app: FastAPI):
         _LOG_INFO.get("format"),
     )
 
+    # ---- orchestrator (Fusion Phase D) ------------------------------------
+    # ORCH_ENABLED is the master switch. Off -> the package is never imported,
+    # so an idle process pays nothing for it (RSS budget) and the panel shows
+    # an explicit "disabled" state instead of pretending to be healthy.
+    app.state.orch = None
+    if settings.orch_enabled:
+        orch = None
+        try:
+            orch = build_orchestrator(settings)
+            started = await orch.start()
+        except Exception as exc:  # noqa: BLE001 - boot must survive a bad orch
+            log.exception("orchestrator failed to start")
+            bus.publish(
+                f"Orchestrator gagal start ({type(exc).__name__}: {exc}) — panel "
+                "menampilkannya sebagai 'disabled'.",
+                level="error",
+                source="orchestrator",
+            )
+            if orch is not None:
+                try:
+                    await orch.close()
+                except Exception:  # noqa: BLE001 - shutdown must not raise
+                    log.warning("orchestrator: close() after a failed start raised")
+            orch = None
+        app.state.orch = orch
+        if orch is not None:
+            bus.publish(
+                "Orchestrator aktif: "
+                f"agent_ws={started.get('agent_ws')} "
+                f"(enabled={started.get('agent_ws_enabled')}), "
+                f"started={','.join(started.get('started') or []) or '-'}, "
+                f"autostart={started.get('autostart')}.",
+                source="orchestrator",
+            )
+            provision = started.get("provision")
+            if provision is not None:
+                bus.publish(
+                    f"ORCH_AUTOSTART: provisioning -> ok={provision.get('ok')} "
+                    f"err={provision.get('error')}",
+                    level="info" if provision.get("ok") else "warn",
+                    source="orchestrator",
+                )
+    else:
+        bus.publish(
+            "ORCH_ENABLED=false — orchestrator, agent WS and snapshots are off "
+            "(power actions use the Daytona API directly).",
+            source="boot",
+        )
+
     try:
         yield
     finally:
         bus.publish("DayHost shutting down", level="warn", source="boot")
+        orch = getattr(app.state, "orch", None)
+        if orch is not None:
+            # Stop the listener/tasks BEFORE the HTTP clients go away: close()
+            # may still flush a delta or send an agent command.
+            try:
+                await orch.close()
+            except Exception:  # noqa: BLE001 - shutdown must not raise
+                log.warning("orchestrator: close() raised during shutdown")
+            app.state.orch = None
         await close_client()
         # Close the toolbox client too, but only if the transport ever loaded it:
         # importing it here would pull httpx into every shutdown path.

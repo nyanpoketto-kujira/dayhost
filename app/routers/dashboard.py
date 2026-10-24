@@ -1,7 +1,17 @@
-"""Dashboard: HTML shell + JSON/HTMX fragments for status, power, SSE logs."""
+"""Dashboard: HTML shell + JSON/HTMX fragments for status, power, SSE logs.
+
+Fusion Phase D adds the orchestrator panel (host/agent partials, manual backup,
+HTMX start/stop) plus a **named** SSE bridge (``event: state``). The log frames
+keep their old anonymous ``data:`` shape on purpose: ``app/static/js/console.js``
+listens on ``source.onmessage``, and per the SSE spec a named event never fires
+``onmessage`` — so the console stays clean JSON-free without being touched.
+"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+import asyncio
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from ..auth import require_user
@@ -66,6 +76,53 @@ async def _safe(coro):
         }
 
 
+# --------------------------------------------------------------------- orch
+def _orch(request: Request):
+    """The live orchestrator, or a clean 503 (never a 500 / traceback).
+
+    ``ORCH_ENABLED=false`` (and a failed start) leave ``app.state.orch`` as
+    ``None``. Every *mutating* orchestrator route goes through here; the two
+    read-only partials render an explicit ``disabled`` card instead, so the
+    dashboard is honest rather than broken.
+    """
+    orch = getattr(request.app.state, "orch", None)
+    if orch is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Orchestrator nonaktif (ORCH_ENABLED=false atau gagal start).",
+        )
+    return orch
+
+
+async def _host_view(request: Request) -> dict:
+    """Panel data for both partials. Never raises, never blocks the loop."""
+    orch = getattr(request.app.state, "orch", None)
+    if orch is None:
+        return {"available": False}
+    view: dict = {"available": True}
+    try:
+        state = orch.state
+        view["state"] = state.public_state()
+        view["ws"] = orch.ws.public_state() if getattr(orch, "ws", None) is not None else {}
+        view["counters"] = dict(getattr(orch, "counters", {}) or {})
+        cfg = getattr(orch, "store_cfg", None)
+        if cfg is not None:
+            view["paths"] = {
+                "mirror": str(cfg.mirror_dir),
+                "snapshots": str(cfg.snapshots_dir),
+            }
+    except Exception as exc:  # noqa: BLE001 - a panel must never 500
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+    try:
+        view["backups"] = await asyncio.to_thread(orch.storage.backups_payload)
+    except Exception as exc:  # noqa: BLE001 - empty listing beats a 500
+        view["backups"] = {
+            "snapshots": [], "deltas": {}, "mirror": {"has_world": False},
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return view
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, user: str = Depends(require_user)) -> HTMLResponse:
     status = await gather_status()
@@ -78,6 +135,10 @@ async def index(request: Request, user: str = Depends(require_user)) -> HTMLResp
             "username": user,
             "status": status,
             "events": events,
+            # Phase D panel context (same data the two partials render).
+            "host": await _host_view(request),
+            "tunnel": status["tunnel"],
+            "public_endpoint": status["public_endpoint"],
         },
     )
 
@@ -94,6 +155,112 @@ async def partial_status(request: Request, _user: str = Depends(require_user)) -
     return templates.TemplateResponse(
         request, "partials/status.html", {"status": status}
     )
+
+
+@router.get("/partials/host", response_class=HTMLResponse)
+async def partial_host(request: Request, _user: str = Depends(require_user)) -> HTMLResponse:
+    """Orchestrator host card (sandbox + MC process + provisioning)."""
+    return templates.TemplateResponse(
+        request, "partials/host.html", {"host": await _host_view(request)}
+    )
+
+
+@router.get("/partials/agent", response_class=HTMLResponse)
+async def partial_agent(request: Request, _user: str = Depends(require_user)) -> HTMLResponse:
+    """Agent-link card + tunnel + snapshot list."""
+    settings = get_settings()
+    tun = await _safe(tunnel.probe(settings))
+    tunnel_dict = tun.as_dict() if hasattr(tun, "as_dict") else {"socket_open": False}
+    return templates.TemplateResponse(
+        request,
+        "partials/agent.html",
+        {
+            "host": await _host_view(request),
+            "tunnel": tunnel_dict,
+            "public_endpoint": tunnel_dict.get("public_endpoint", ""),
+        },
+    )
+
+
+@router.post("/backup", response_class=HTMLResponse)
+async def backup_now(request: Request, user: str = Depends(require_user)) -> HTMLResponse:
+    """Manual snapshot. An empty mirror is a *normal* answer, not an error."""
+    orch = _orch(request)
+    bus.publish(f"backup manual diminta oleh {user}", level="info", source="backup")
+    try:
+        result = await orch.snapshot_now(reason="manual")
+    except ValueError as exc:
+        # Storage raises ValueError for "no world yet" and for tar/timeout
+        # failures. Both are operator-facing messages, never a 500.
+        result = {"ok": False, "kind": "invalid", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - report, do not traceback
+        bus.publish(
+            f"backup manual gagal: {type(exc).__name__}: {exc}",
+            level="error",
+            source="backup",
+        )
+        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    skipped = str(result.get("skipped") or "")
+    no_world = skipped.startswith("no world") or result.get("kind") == "invalid"
+    if not result.get("ok") and no_world:
+        return templates.TemplateResponse(
+            request,
+            "partials/backup_result.html",
+            {
+                "ok": False,
+                "message": "Belum ada data untuk di-backup "
+                           "(mirror masih kosong / world/level.dat tidak ada).",
+                "detail": result.get("error") or "",
+            },
+            status_code=200,
+        )
+    if not result.get("ok"):
+        return templates.TemplateResponse(
+            request,
+            "partials/backup_result.html",
+            {"ok": False, "message": "Backup gagal.", "detail": result.get("error") or ""},
+            status_code=200,
+        )
+    return templates.TemplateResponse(
+        request,
+        "partials/backup_result.html",
+        {
+            "ok": True,
+            "message": f"Snapshot dibuat: {result.get('name')} "
+                       f"({result.get('size_human')}).",
+            "detail": "",
+        },
+        status_code=200,
+    )
+
+
+@router.post("/host/start", response_class=HTMLResponse)
+async def host_start(request: Request, user: str = Depends(require_user)) -> HTMLResponse:
+    orch = _orch(request)
+    bus.publish(f"provisioning diminta oleh {user}", level="info", source="orchestrator")
+    result = await orch.start_host(reason="manual")
+    if not result.get("ok"):
+        bus.publish(
+            f"provisioning gagal: {result.get('error')}",
+            level="warn",
+            source="orchestrator",
+        )
+    return await partial_host(request, user)
+
+
+@router.post("/host/stop", response_class=HTMLResponse)
+async def host_stop(request: Request, user: str = Depends(require_user)) -> HTMLResponse:
+    orch = _orch(request)
+    bus.publish(f"stop host diminta oleh {user}", level="info", source="orchestrator")
+    result = await orch.stop_host(reason="manual")
+    if not result.get("ok"):
+        bus.publish(
+            f"stop host gagal: {result.get('error')}",
+            level="warn",
+            source="orchestrator",
+        )
+    return await partial_host(request, user)
 
 
 async def _power(action: str, request: Request, user: str) -> HTMLResponse:
@@ -243,6 +410,56 @@ async def sse_events(request: Request, _user: str = Depends(require_user)) -> St
     queue = await bus.subscribe()
     return StreamingResponse(
         bus.stream(queue),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _state_frames(request: Request):
+    """Yield ``event: state`` frames (named!), plus comment keepalives.
+
+    Named events are invisible to ``source.onmessage`` (SSE spec), which is
+    exactly why the old console keeps working untouched. Payload is one JSON
+    object per line, never raw log text.
+    """
+    last = None
+    ticks = 0
+    while True:
+        if await request.is_disconnected():
+            return
+        orch = getattr(request.app.state, "orch", None)
+        if orch is None:
+            payload = {"available": False, "reason": "disabled"}
+        else:
+            try:
+                payload = {"available": True, "state": orch.state.public_state()}
+            except Exception as exc:  # noqa: BLE001 - a stream must not die
+                payload = {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if body != last:
+            last = body
+            yield f"event: state\ndata: {body}\n\n"
+            ticks = 0
+        else:
+            ticks += 1
+            if ticks >= 15:      # ~15 s with no change: keep the pipe warm
+                ticks = 0
+                yield ": keepalive\n\n"
+        try:
+            await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+
+
+@router.get("/events/state")
+async def sse_state(request: Request, _user: str = Depends(require_user)) -> StreamingResponse:
+    """Orchestrator state stream for the Phase-D panel (``addEventListener``)."""
+    return StreamingResponse(
+        _state_frames(request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
