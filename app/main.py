@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -173,6 +174,77 @@ async def lifespan(app: FastAPI):
             source="boot",
         )
 
+    # ---- ssh tunnel (TUNNEL_MODE=ssh) -------------------------------------
+    # Imported *inside* the branch on purpose: the module is ~680 lines and
+    # pulls asyncio.subprocess, and frp/none deployments never touch it (RSS
+    # budget). Boot must survive a bad tunnel: start() does not raise, and the
+    # wrapper below covers everything else — failures land in last_error and
+    # the panel renders them instead of the process dying.
+    app.state.tunnel = None
+    if settings.tunnel_mode.strip().lower() == "ssh":
+        ssh_tunnel = None
+        try:
+            from .services.ssh_tunnel import SSHTunnel
+
+            ssh_tunnel = SSHTunnel(settings)
+            await ssh_tunnel.start()
+            # Bounded readiness wait. `start()` only spawns the supervisor, so a
+            # plain `wait_ready(timeout=...)` would hold the lifespan open for
+            # the whole window even when the tunnel can never come up (e.g. no
+            # DAYTONA_API_KEY) — the dashboard would not serve /healthz until
+            # it expired. So wait in short slices and bail out as soon as the
+            # supervisor has recorded an error and is not running: boot stays
+            # fast on failure, and a healthy tunnel still gets the full window.
+            deadline = time.monotonic() + settings.ssh_connect_timeout + 5
+            ok = False
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if await ssh_tunnel.wait_ready(timeout=min(0.25, remaining)):
+                    ok = True
+                    break
+                snap = ssh_tunnel.status() or {}
+                if snap.get("last_error") and not snap.get("running"):
+                    break
+            snap = ssh_tunnel.status() or {}
+            endpoint = snap.get("public_endpoint") or (
+                f"{settings.public_host}:{settings.public_port}"
+                if settings.public_host
+                else f"{settings.ssh_bind_mc}:{settings.public_port}"
+            )
+            pid = snap.get("pid")
+            if ok:
+                bus.publish(
+                    f"SSH tunnel aktif: mode=ssh endpoint={endpoint} pid={pid}.",
+                    source="tunnel",
+                )
+            else:
+                bus.publish(
+                    f"SSH tunnel belum siap: mode=ssh endpoint={endpoint} pid={pid} "
+                    f"err={snap.get('last_error') or '-'}.",
+                    level="warn",
+                    source="tunnel",
+                )
+            # Kept even when not ready: the supervisor retries in the
+            # background and status() is where last_error is visible.
+            app.state.tunnel = ssh_tunnel
+        except Exception as exc:  # noqa: BLE001 - boot must survive a bad tunnel
+            log.exception("ssh tunnel failed to start")
+            # Type only, never str(exc): the token lives in ssh credentials and
+            # an exception message is the one place it could surface.
+            bus.publish(
+                f"SSH tunnel gagal start ({type(exc).__name__}) — mode=ssh.",
+                level="error",
+                source="tunnel",
+            )
+            if ssh_tunnel is not None:
+                try:
+                    await ssh_tunnel.stop()
+                except Exception:  # noqa: BLE001 - shutdown must not raise
+                    log.warning("ssh tunnel: stop() after a failed start raised")
+            app.state.tunnel = None
+
     try:
         yield
     finally:
@@ -186,6 +258,15 @@ async def lifespan(app: FastAPI):
             except Exception:  # noqa: BLE001 - shutdown must not raise
                 log.warning("orchestrator: close() raised during shutdown")
             app.state.orch = None
+        # The ssh child must be reaped and its 0600 temp config unlinked before
+        # the process exits; the tunnel owns nothing close_client() needs.
+        ssh_tunnel = getattr(app.state, "tunnel", None)
+        if ssh_tunnel is not None:
+            try:
+                await ssh_tunnel.stop()
+            except Exception:  # noqa: BLE001 - shutdown must not raise
+                log.warning("ssh tunnel: stop() raised during shutdown")
+            app.state.tunnel = None
         await close_client()
         # Close the toolbox client too, but only if the transport ever loaded it:
         # importing it here would pull httpx into every shutdown path.

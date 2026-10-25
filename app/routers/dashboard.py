@@ -25,8 +25,13 @@ from ..templating import templates
 router = APIRouter(tags=["dashboard"])
 
 
-async def gather_status() -> dict:
-    """Collect every widget signal concurrently. Never raises."""
+async def gather_status(tunnel_live: dict | None = None) -> dict:
+    """Collect every widget signal concurrently. Never raises.
+
+    ``tunnel_live`` is the *live* ``SSHTunnel`` snapshot (see ``_live_tunnel``),
+    passed in by the call sites because this function takes no ``Request``. It
+    is optional so the three existing callers keep their old signature.
+    """
     import asyncio
 
     settings = get_settings()
@@ -55,7 +60,10 @@ async def gather_status() -> dict:
         "sandbox_desired_state": daytona.get("desired_state"),
         "ping": ping_dict,
         "tunnel": tunnel_dict,
+        # Live ssh-tunnel snapshot (None for frp/none and for a failed start).
+        "tunnel_live": tunnel_live,
         "mc_endpoint": f"{settings.mc_host}:{settings.mc_port}",
+        # frp keeps owning this: it comes from the observer, not from ssh.
         "public_endpoint": tunnel_dict.get("public_endpoint", ""),
         "stub_console": not settings.rcon_configured,
         "sync_enabled": settings.sync_enabled,
@@ -74,6 +82,25 @@ async def _safe(coro):
             "online": False,
             "socket_open": False,
         }
+
+
+def _live_tunnel(request: Request) -> dict | None:
+    """Live ``SSHTunnel.status()``, or ``None``.
+
+    ``app.state.tunnel`` is ``None`` unless ``TUNNEL_MODE=ssh`` and the start
+    succeeded, so the frp/none paths are untouched. Guarded twice: a missing
+    attribute and a raising ``status()`` both degrade to ``None`` rather than
+    breaking the dashboard.
+    """
+    tunnel_obj = getattr(getattr(request, "app", None), "state", None)
+    tunnel_obj = getattr(tunnel_obj, "tunnel", None)
+    if tunnel_obj is None:
+        return None
+    try:
+        snap = tunnel_obj.status()
+    except Exception:  # noqa: BLE001 - the panel must never 500 over this
+        return None
+    return snap if isinstance(snap, dict) else None
 
 
 # --------------------------------------------------------------------- orch
@@ -125,7 +152,7 @@ async def _host_view(request: Request) -> dict:
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request, user: str = Depends(require_user)) -> HTMLResponse:
-    status = await gather_status()
+    status = await gather_status(tunnel_live=_live_tunnel(request))
     events = [dict(row) for row in await recent_events(20)]
     return templates.TemplateResponse(
         request,
@@ -145,13 +172,13 @@ async def index(request: Request, user: str = Depends(require_user)) -> HTMLResp
 
 @router.get("/api/status")
 async def api_status(request: Request, _user: str = Depends(require_user)) -> JSONResponse:
-    return JSONResponse(await gather_status())
+    return JSONResponse(await gather_status(tunnel_live=_live_tunnel(request)))
 
 
 @router.get("/partials/status", response_class=HTMLResponse)
 async def partial_status(request: Request, _user: str = Depends(require_user)) -> HTMLResponse:
     """HTMX fragment: refreshed every few seconds + after every power action."""
-    status = await gather_status()
+    status = await gather_status(tunnel_live=_live_tunnel(request))
     return templates.TemplateResponse(
         request, "partials/status.html", {"status": status}
     )
