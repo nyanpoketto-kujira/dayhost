@@ -203,3 +203,51 @@ Regression gates re-run by hand after the patch, all green with their summary li
 `check_rcon` → `ALL RCON CHECKS PASSED` · `check_orchestrator` → `125/125` ·
 `check_sync` → `ALL SYNC CHECKS PASSED` · `check_agent_ws` → `ALL 104 AGENT-WS CHECKS PASSED` ·
 `check_panel` → `62/62`. `requirements.txt` unchanged: md5 `95dfd238...fcae2`, 7 packages.
+
+## B2 landed: `SSHTunnel` daemon (verified 2026-10-25)
+
+`app/services/ssh_tunnel.py` owns exactly one `ssh -N` child and keeps it alive.
+`scripts/check_ssh_tunnel.py` is a 32-assertion offline gate (fake client, fake proc,
+fake probe) and ends with `ALL SSH TUNNEL CHECKS PASSED`.
+
+The token never reaches argv. `ps aux` prints the whole command line, and on this
+endpoint the token **is** the ssh username, so argv only ever carries
+`ssh -N -F <tmp> dayhost-sandbox`. The credential lives in a `0600` config that ssh
+reads at startup and that is unlinked the moment the forwards listen — and on every
+error path and in `stop()`.
+
+## End-to-end proof: a real Minecraft handshake served through the tunnel
+
+The same three `-L` forwards in one ssh session, sandbox running Paper 1.21.11-132
+(pid 1222, `*:25565`), VPS tunnel pid holding `0.0.0.0:34212` and `127.0.0.1:25575`:
+
+```
+[publik#1] RESULT : HANDSHAKE OK    version: Paper 1.21.11 (proto 774)   players 0/5
+[publik#2] RESULT : HANDSHAKE OK    version: Paper 1.21.11 (proto 774)   players 0/5
+[publik#3] RESULT : HANDSHAKE OK    version: Paper 1.21.11 (proto 774)   players 0/5
+[vps-loop] RESULT : HANDSHAKE OK    motd: "DayHost via SSH tunnel"
+[venet]    RESULT : HANDSHAKE OK    motd: "DayHost via SSH tunnel"
+```
+
+`151.243.222.93:34212` answers a real status ping from outside the network, three
+times in a row. **This is the milestone that was blocked all of yesterday: the server
+is joinable without frp, without sandbox egress, and without a paid tier upgrade.**
+
+A single `ConnectionResetError` was observed between the runs. It did not reproduce
+across the next three probes plus a tcpdump run, and the capture recorded no traffic
+during the failure, so it is a transient NAT/path reset rather than a filter. Not
+explained yet, just not blocking.
+
+## Operational trap found while proving this: Paperclip needs two jars, not one
+
+`paperclip` downloads the vanilla Mojang server jar on first start
+(`Downloading mojang_1.21.11.jar` → `SocketException: Connection reset`). With egress
+blocked the server dies before binding. Fix, proven: fetch the jar **on the VPS**, push
+it to `<server_dir>/cache/mojang_1.21.11.jar` over the toolbox file API, then start.
+`cache/` is created by Paperclip itself, which is how the target path was confirmed
+rather than guessed. Verify the pushed bytes by sha1, not by HTTP 200.
+
+Also: the sandbox reaches neither `api.minecraftservices.com` nor
+`piston-meta.mojang.com`, so `online-mode=true` cannot work there and startup logs
+`Failed to request yggdrasil public key`. Offline mode is a hard consequence of the
+egress policy, not a preference.
