@@ -228,9 +228,19 @@ class Settings:
     mc_ping_timeout: int = 4
 
     # --- Tunnel -------------------------------------------------------------
-    tunnel_mode: str = "frp"
+    tunnel_mode: str = "frp"        # "frp" | "ssh" | "none"
     public_host: str = ""
     public_port: int = 25565
+
+    # --- SSH tunnel to the Daytona sandbox (see docs/daytona-ssh-tunnel.md) --
+    # The sandbox cannot dial us (org-level egress block), so the VPS dials
+    # the sandbox. These are only used when tunnel_mode == "ssh".
+    ssh_host: str = "ssh.app.daytona.io"
+    ssh_token_minutes: int = 1440
+    ssh_connect_timeout: float = 25.0
+    ssh_renew_margin: float = 600.0
+    ssh_bind_mc: str = "0.0.0.0"
+
     frpc_log_path: str = ""
     # --- FRP client (Fase E) ------------------------------------------------
     # Values written into the sandbox's agent.env; the agent edits none of them
@@ -479,6 +489,11 @@ def _build() -> Settings:
         tunnel_mode=_str("TUNNEL_MODE", "frp"),
         public_host=_str("PUBLIC_HOST"),
         public_port=_int("PUBLIC_PORT", 25565),
+        ssh_host=_str("SSH_HOST", "ssh.app.daytona.io"),
+        ssh_token_minutes=_int("SSH_TOKEN_MINUTES", 1440),
+        ssh_connect_timeout=_float("SSH_CONNECT_TIMEOUT", 25.0),
+        ssh_renew_margin=_float("SSH_RENEW_MARGIN", 600.0),
+        ssh_bind_mc=_str("SSH_BIND_MC", "0.0.0.0"),
         frpc_log_path=_str("FRPC_LOG_PATH"),
         frp_server_addr=_str("FRP_SERVER_ADDR"),
         frp_server_port=_int("FRP_SERVER_PORT", 7000),

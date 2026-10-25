@@ -309,6 +309,86 @@ class DaytonaClient:
         """POST /sandbox/{id}/recover — only meaningful when `recoverable` is true."""
         return await self._request("POST", self.settings.daytona_path_recover)
 
+    async def create_ssh_access(self, expires_minutes: int) -> dict[str, Any]:
+        """POST /sandbox/{id}/ssh-access?expiresInMinutes=N -> SSH token.
+
+        The expiry MUST ride in the QUERY STRING. In the JSON body it is
+        silently ignored and every token comes back with +60 minutes
+        (docs/daytona-ssh-tunnel.md). The body is therefore `{}`.
+
+        Never raises and never logs the token: the response body contains the
+        credential itself, so only the status code is recorded.
+        """
+        result: dict[str, Any] = {
+            "ok": False,
+            "token": "",
+            "expires_at": "",
+            "error": "",
+            "status_code": None,
+        }
+
+        if not self.configured:
+            result["error"] = "daytona not configured"
+            return result
+
+        try:
+            minutes = int(expires_minutes)
+        except (TypeError, ValueError):
+            result["error"] = "invalid expires_minutes"
+            return result
+        if minutes <= 0:
+            result["error"] = "invalid expires_minutes"
+            return result
+
+        path = self._path("/sandbox/{sandbox_id}/ssh-access")
+        params = {"expiresInMinutes": minutes}
+
+        import httpx  # local alias; httpx is an existing dependency
+
+        try:
+            client = await self._http()
+            # No resp.text in the log line: it carries the bearer token.
+            resp = await client.post(path, json={}, params=params)
+            result["status_code"] = resp.status_code
+
+            payload: Any = None
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = None
+
+            log.debug("daytona POST %s -> %s", path, resp.status_code)
+
+            if resp.status_code >= 400:
+                detail = ""
+                if isinstance(payload, dict):
+                    detail = str(payload.get("message") or payload.get("error") or "")
+                result["error"] = (
+                    f"HTTP {resp.status_code}" + (f": {detail}" if detail else "")
+                )
+                return result
+
+            if not isinstance(payload, dict):
+                result["error"] = "unexpected response (not JSON)"
+                return result
+
+            token = payload.get("token")
+            if not token:
+                result["error"] = "response missing token"
+                return result
+
+            result["ok"] = True
+            result["token"] = str(token)
+            result["expires_at"] = str(payload.get("expiresAt") or "")
+            result["error"] = ""
+            return result
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            return result
+        except Exception as exc:  # pragma: no cover - defensive
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            return result
+
     async def restart(self) -> dict[str, Any]:
         """Stop then start. Best effort; reports both legs."""
         stop_result = await self.stop()
