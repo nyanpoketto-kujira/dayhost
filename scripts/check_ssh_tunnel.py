@@ -1,10 +1,15 @@
-"""Offline checks for app/services/ssh_tunnel.py — no network, no real ssh.
+"""Offline checks for app/services/ssh_tunnel.py — no network by default.
 
 Run standalone: `python scripts/check_ssh_tunnel.py`
 
 Fakes: a DaytonaClient-shaped token source, a fake ssh process, a fake forward
-probe, and a fake argv capturer. Nothing touches the network or spawns a
-binary, so this is safe to run anywhere.
+probe, and a fake argv capturer. By default nothing touches the network.
+
+The one exception is deliberate and offline: the generated config is handed to
+the **real** `ssh -G`, which parses the file and prints the effective config
+without opening a connection. That is the assertion that would have caught the
+`LocalForward` two-argument bug: 32 string asserts passed while `ssh` rejected
+the file with `Missing target argument` and exited 255 before any I/O.
 
 Proves:
   1. the 0600 ssh config holds the credential (`User <token>`) and the three
@@ -14,7 +19,13 @@ Proves:
   3. status() exposes the documented keys and leaks no token in its JSON dump,
   4. a child exit increments `restarts` and a new ssh is spawned,
   5. renewal refetches a token without tearing down a working tunnel on failure,
-  6. stop() leaves no child, no supervisor task and no temp config file.
+  6. stop() leaves no child, no supervisor task and no temp config file,
+  7. every LocalForward line is in the two-argument config form ssh requires
+     (`LocalForward [bind:]port host:hostport`), never the `-L` single token,
+  8. the real `ssh -G` accepts the generated config (rc=0, empty stderr).
+
+Optional, opt-in, network: `DAYHOST_SSH_LIVE=1` additionally fetches a real
+token and authenticates against the real host. Skipped by default.
 
 Exit 0 = pass.
 """
@@ -23,7 +34,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -193,6 +208,157 @@ async def wait_for(predicate, timeout: float = 3.0, interval: float = 0.02) -> b
     return predicate()
 
 
+# ------------------------------------------------------- config-form gate
+# The bug this guards: `LocalForward 0.0.0.0:34212:127.0.0.1:25565` is valid
+# ONLY as `-L` on the command line. In a config file LocalForward takes two
+# arguments, so ssh aborts with "Missing target argument" before any I/O.
+BROKEN_LOCALFORWARD = re.compile(r"^\s*LocalForward\s+\S+:\d+:\S+:\d+\s*$")
+
+
+def localforward_lines(text: str) -> list[str]:
+    return [
+        line
+        for line in text.splitlines()
+        if line.strip().split(maxsplit=1)[:1] == ["LocalForward"]
+    ]
+
+
+def run_ssh_parse_check(config_text: str, label: str) -> bool:
+    """Authoritative check: hand the config to the real ssh and let it parse.
+
+    `ssh -G` prints the effective configuration and exits without connecting,
+    so this is network-free. A missing ssh binary is a hard failure, never a
+    skip: skipping is how the original bug survived.
+    """
+    ssh = shutil.which("ssh")
+    if ssh is None:
+        return check(
+            label,
+            False,
+            "ssh binary not found on PATH — cannot verify the config is parseable",
+        )
+
+    fd, path = tempfile.mkstemp(prefix="dayhost-check-", suffix=".conf")
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, config_text.encode("utf-8"))
+        os.close(fd)
+        fd = -1
+        proc = subprocess.run(
+            [ssh, "-G", "-F", path, ssh_tunnel.SSH_ALIAS],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            # Without this, ssh warns about pseudo-terminals when the caller has
+            # a TTY on stdin and the "stderr must be empty" assertion flakes.
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return check(label, False, f"ssh -G could not run: {type(exc).__name__}: {exc}")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    stderr = (proc.stderr or "").strip()
+    detail = f"rc={proc.returncode}"
+    if stderr:
+        detail += f" stderr={stderr.splitlines()[-1]!r}"
+    ok = proc.returncode == 0 and not stderr
+    if ok:
+        parsed = [
+            line for line in proc.stdout.splitlines()
+            if line.lower().startswith("localforward")
+        ]
+        if len(parsed) != len(localforward_lines(config_text)):
+            return check(
+                label,
+                False,
+                f"ssh parsed {len(parsed)} localforward lines, config has "
+                f"{len(localforward_lines(config_text))}",
+            )
+        detail += f", {len(parsed)} localforward line(s) parsed"
+    return check(label, ok, detail)
+
+
+def live_check() -> int:
+    """OPT-IN: real token, real host. `DAYHOST_SSH_LIVE=1`.
+
+    Never prints the token: stderr is redacted against it before display.
+    """
+    from app.config import get_settings  # local: only the live path needs env
+
+    print("\n--- LIVE (DAYHOST_SSH_LIVE=1): real ssh against the real host ---")
+    failures = 0
+    tunnel = None
+    path = None
+    try:
+        settings = get_settings()
+        tunnel = SSHTunnel(settings)
+        acquired = asyncio.run(tunnel._acquire_token())
+        secret = tunnel._secret
+        failures += 0 if check(
+            "live: token acquired",
+            acquired,
+            "" if acquired else tunnel._redact(tunnel._last_error or "no token"),
+        ) else 1
+        if not acquired:
+            return failures
+
+        config_text = tunnel._config_text(secret)
+        fd, path = tempfile.mkstemp(prefix="dayhost-live-", suffix=".conf")
+        os.fchmod(fd, 0o600)
+        os.write(fd, config_text.encode("utf-8"))
+        os.close(fd)
+
+        parse_ok = run_ssh_parse_check(
+            config_text, "live: real ssh -G accepts the generated config"
+        )
+        failures += 0 if parse_ok else 1
+
+        # Auth-only probe. ExitOnForwardFailure is relaxed on the command line
+        # so a dead sandbox listener cannot masquerade as a config/auth error.
+        proc = subprocess.run(
+            [
+                "ssh", "-F", path,
+                "-o", "ExitOnForwardFailure=no",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=15",
+                ssh_tunnel.SSH_ALIAS, "true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            stdin=subprocess.DEVNULL,
+        )
+        stderr = tunnel._redact((proc.stderr or "").strip())
+        detail = f"rc={proc.returncode}"
+        if stderr:
+            detail += " stderr=" + repr(stderr.splitlines()[-1])
+        failures += 0 if check("live: real ssh authenticates against ssh.app.daytona.io", proc.returncode == 0, detail) else 1
+    except Exception as exc:
+        failures += 0 if check("live section completed", False, f"{type(exc).__name__}: {exc}") else 1
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        if tunnel is not None:
+            # Drop the in-memory credential and the httpx client; never print it.
+            tunnel._secret = ""
+            client = tunnel._client
+            if client is not None:
+                try:
+                    asyncio.run(client.aclose())
+                except Exception:
+                    pass
+    return failures
+
+
 # -------------------------------------------------------------------- scenario
 async def main() -> int:
     failures = 0
@@ -248,14 +414,72 @@ async def main() -> int:
         failures += 0 if ok else 1
 
         expected_forwards = [
-            f"LocalForward 0.0.0.0:{PUBLIC_PORT}:127.0.0.1:25565",
-            f"LocalForward 127.0.0.1:{RCON_PORT}:127.0.0.1:{RCON_PORT}",
-            f"LocalForward 127.0.0.1:{AGENT_PORT}:127.0.0.1:{AGENT_PORT}",
+            # Two-argument config form: bind port and target host:port are
+            # separate tokens. The old colon-joined single token is invalid here.
+            f"LocalForward 0.0.0.0:{PUBLIC_PORT} 127.0.0.1:25565",
+            f"LocalForward 127.0.0.1:{RCON_PORT} 127.0.0.1:{RCON_PORT}",
+            f"LocalForward 127.0.0.1:{AGENT_PORT} 127.0.0.1:{AGENT_PORT}",
         ]
         missing = [line for line in expected_forwards if line not in text]
         ok = check("ssh config has the three LocalForward lines", not missing,
                    f"missing={missing}")
         failures += 0 if ok else 1
+
+        # --- 3b. LocalForward is in ssh's config grammar, not -L argv syntax ---
+        fwd_lines = localforward_lines(text)
+        ok = check("ssh config has exactly three LocalForward lines",
+                   len(fwd_lines) == 3, f"count={len(fwd_lines)}")
+        failures += 0 if ok else 1
+
+        bad_arity = [line for line in fwd_lines if len(line.split()) != 3]
+        ok = check("every LocalForward line has exactly two arguments",
+                   not bad_arity,
+                   f"bad={bad_arity}" if bad_arity else f"sample={fwd_lines[0].strip() if fwd_lines else None}")
+        failures += 0 if ok else 1
+
+        broken = [line for line in fwd_lines if BROKEN_LOCALFORWARD.match(line)]
+        ok = check("no LocalForward uses the broken single-token (colon-joined) form",
+                   not broken, f"broken={broken}")
+        failures += 0 if ok else 1
+
+        ok = check("LocalForward specs still come from _forwards() (colon form intact)",
+                   tunnel.status()["forwards"] == [
+                       f"0.0.0.0:{PUBLIC_PORT}:127.0.0.1:25565",
+                       f"127.0.0.1:{RCON_PORT}:127.0.0.1:{RCON_PORT}",
+                       f"127.0.0.1:{AGENT_PORT}:127.0.0.1:{AGENT_PORT}",
+                   ],
+                   str(tunnel.status()["forwards"]))
+        failures += 0 if ok else 1
+
+        # The assertion that would have caught the whole outage: one run of
+        # the real binary, zero network I/O.
+        ok = run_ssh_parse_check(text, "real `ssh -G` accepts the generated config (rc=0, no stderr)")
+        failures += 0 if ok else 1
+
+        # Defensive parse: a spec without the expected 4 parts must raise at
+        # config-write time instead of emitting a config ssh will reject.
+        for bad_spec, why in (
+            (f"0.0.0.0:{PUBLIC_PORT}:127.0.0.1", "3 parts"),
+            (f"0.0.0.0:{PUBLIC_PORT}:127.0.0.1:25565:extra", "5 parts"),
+            (f"0.0.0.0::127.0.0.1:25565", "empty port"),
+            (f"0.0.0.0:{PUBLIC_PORT}:127.0.0.1:notaport", "non-numeric hostport"),
+        ):
+            original = tunnel._forwards
+            try:
+                tunnel._forwards = lambda spec=bad_spec: [spec]
+                tunnel._config_text(TOKEN)
+            except ValueError as exc:
+                ok = check(f"malformed spec rejected at config-write time ({why})",
+                           "LocalForward" in str(exc), str(exc)[:90])
+            except Exception as exc:  # pragma: no cover - wrong exception type
+                ok = check(f"malformed spec rejected at config-write time ({why})",
+                           False, f"raised {type(exc).__name__}, not ValueError")
+            else:
+                ok = check(f"malformed spec rejected at config-write time ({why})",
+                           False, "no error raised")
+            finally:
+                tunnel._forwards = original
+            failures += 0 if ok else 1
 
         ok = check("ssh config sets ExitOnForwardFailure + ConnectTimeout",
                    "ExitOnForwardFailure yes" in text and "ConnectTimeout" in text)
@@ -450,6 +674,12 @@ async def main() -> int:
             await tunnel.stop()
         except Exception:
             pass
+
+    print()
+    if os.environ.get("DAYHOST_SSH_LIVE") == "1":
+        failures += live_check()
+    else:
+        print("SKIP live (set DAYHOST_SSH_LIVE=1)")
 
     print()
     if failures:

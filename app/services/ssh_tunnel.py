@@ -293,7 +293,15 @@ class SSHTunnel:
         return unique
 
     def _config_text(self, secret: str) -> str:
-        """The 0600 file ssh reads via ``-F``. The credential lives here only."""
+        """The 0600 file ssh reads via ``-F``. The credential lives here only.
+
+        ``LocalForward`` in a config file takes TWO arguments
+        (``[bind_address:]port host:hostport``); the colon-joined single token
+        that ``-L`` accepts on the command line is rejected by ssh with
+        ``Missing target argument`` before any network I/O. The specs from
+        :meth:`_forwards` are therefore split here, not in ``_forwards``: its
+        colon-joined form stays correct for ``-L`` argv and for status().
+        """
         s = self.settings
         connect_timeout = max(_MIN_CONNECT_TIMEOUT, float(s.ssh_connect_timeout))
         lines = [
@@ -314,7 +322,29 @@ class SSHTunnel:
             "    ServerAliveCountMax 3",
             "    LogLevel ERROR",
         ]
-        lines += [f"    LocalForward {spec}" for spec in self._forwards()]
+        def forward_line(spec: str) -> str:
+            """``bind:port:host:hostport`` -> the two-argument config form."""
+            parts = spec.split(":", 3)
+            if len(parts) != 4 or ":" in parts[3]:
+                raise ValueError(
+                    f"cannot render LocalForward for spec {spec!r}: expected "
+                    "'bind:port:host:hostport' (4 parts, split at the 3rd colon)"
+                )
+            bind, port, host, hostport = (part.strip() for part in parts)
+            if not bind or not host:
+                raise ValueError(
+                    f"cannot render LocalForward for spec {spec!r}: "
+                    "bind address and host must be non-empty"
+                )
+            for label, value in (("port", port), ("hostport", hostport)):
+                if not value.isdigit() or not 0 < int(value) < 65536:
+                    raise ValueError(
+                        f"cannot render LocalForward for spec {spec!r}: "
+                        f"{label} {value!r} is not a valid port"
+                    )
+            return f"    LocalForward {bind}:{port} {host}:{hostport}"
+
+        lines += [forward_line(spec) for spec in self._forwards()]
         return "\n".join(lines) + "\n"
 
     def _write_config(self, secret: str) -> str:
