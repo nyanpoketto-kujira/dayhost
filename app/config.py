@@ -240,6 +240,12 @@ class Settings:
     ssh_connect_timeout: float = 25.0
     ssh_renew_margin: float = 600.0
     ssh_bind_mc: str = "0.0.0.0"
+    # The app itself listens on AGENT_WS_PORT (8765), so a forward to that same
+    # port collides with our own socket and ExitOnForwardFailure kills the whole
+    # ssh session (MC + RCON included). The agent_ws forward is therefore
+    # opt-in and, when enabled, binds a different local port.
+    ssh_forward_agent_ws: bool = False
+    ssh_agent_forward_port: int = 18765
 
     frpc_log_path: str = ""
     # --- FRP client (Fase E) ------------------------------------------------
@@ -494,6 +500,8 @@ def _build() -> Settings:
         ssh_connect_timeout=_float("SSH_CONNECT_TIMEOUT", 25.0),
         ssh_renew_margin=_float("SSH_RENEW_MARGIN", 600.0),
         ssh_bind_mc=_str("SSH_BIND_MC", "0.0.0.0"),
+        ssh_forward_agent_ws=_bool("SSH_FORWARD_AGENT_WS", False),
+        ssh_agent_forward_port=_int("SSH_AGENT_FORWARD_PORT", 18765),
         frpc_log_path=_str("FRPC_LOG_PATH"),
         frp_server_addr=_str("FRP_SERVER_ADDR"),
         frp_server_port=_int("FRP_SERVER_PORT", 7000),

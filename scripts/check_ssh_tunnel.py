@@ -12,8 +12,12 @@ without opening a connection. That is the assertion that would have caught the
 the file with `Missing target argument` and exited 255 before any I/O.
 
 Proves:
-  1. the 0600 ssh config holds the credential (`User <token>`) and the three
-     LocalForward lines, and is deleted once ssh is up,
+  1. the 0600 ssh config holds the credential (`User <token>`) and exactly the
+     two always-on LocalForward lines (MC + RCON), and is deleted once ssh is up,
+  1b. the agent-link forward is opt-in: with SSH_FORWARD_AGENT_WS=true it adds a
+     third line mapping SSH_AGENT_FORWARD_PORT -> AGENT_WS_PORT, and a config
+     whose local agent port equals AGENT_WS_PORT is rejected loudly (ValueError)
+     instead of binding the app's own listener,
   2. the token NEVER appears in the argv handed to ssh (the security invariant:
      `ps aux` shows argv),
   3. status() exposes the documented keys and leaks no token in its JSON dump,
@@ -413,22 +417,29 @@ async def main() -> int:
         ok = check("ssh config contains 'User <token>'", f"User {TOKEN}" in text)
         failures += 0 if ok else 1
 
+        # Defaults: the agent-link forward is OFF, because the app itself owns
+        # AGENT_WS_PORT (8765) and ExitOnForwardFailure turns that single bind
+        # collision into a dead tunnel for MC and RCON as well.
         expected_forwards = [
             # Two-argument config form: bind port and target host:port are
             # separate tokens. The old colon-joined single token is invalid here.
             f"LocalForward 0.0.0.0:{PUBLIC_PORT} 127.0.0.1:25565",
             f"LocalForward 127.0.0.1:{RCON_PORT} 127.0.0.1:{RCON_PORT}",
-            f"LocalForward 127.0.0.1:{AGENT_PORT} 127.0.0.1:{AGENT_PORT}",
         ]
         missing = [line for line in expected_forwards if line not in text]
-        ok = check("ssh config has the three LocalForward lines", not missing,
+        ok = check("ssh config has the two required LocalForward lines", not missing,
                    f"missing={missing}")
+        failures += 0 if ok else 1
+
+        ok = check("no LocalForward targets the app's own agent_ws port by default",
+                   f"127.0.0.1:{AGENT_PORT} 127.0.0.1:{AGENT_PORT}" not in text,
+                   f"text contains 8765->8765" if f"127.0.0.1:{AGENT_PORT} 127.0.0.1:{AGENT_PORT}" in text else "")
         failures += 0 if ok else 1
 
         # --- 3b. LocalForward is in ssh's config grammar, not -L argv syntax ---
         fwd_lines = localforward_lines(text)
-        ok = check("ssh config has exactly three LocalForward lines",
-                   len(fwd_lines) == 3, f"count={len(fwd_lines)}")
+        ok = check("ssh config has exactly two LocalForward lines by default",
+                   len(fwd_lines) == 2, f"count={len(fwd_lines)}")
         failures += 0 if ok else 1
 
         bad_arity = [line for line in fwd_lines if len(line.split()) != 3]
@@ -446,7 +457,6 @@ async def main() -> int:
                    tunnel.status()["forwards"] == [
                        f"0.0.0.0:{PUBLIC_PORT}:127.0.0.1:25565",
                        f"127.0.0.1:{RCON_PORT}:127.0.0.1:{RCON_PORT}",
-                       f"127.0.0.1:{AGENT_PORT}:127.0.0.1:{AGENT_PORT}",
                    ],
                    str(tunnel.status()["forwards"]))
         failures += 0 if ok else 1
@@ -454,6 +464,50 @@ async def main() -> int:
         # The assertion that would have caught the whole outage: one run of
         # the real binary, zero network I/O.
         ok = run_ssh_parse_check(text, "real `ssh -G` accepts the generated config (rc=0, no stderr)")
+        failures += 0 if ok else 1
+
+        # --- 3c. opt-in agent forward uses its own LOCAL port ----------------
+        optin = SSHTunnel(
+            make_settings(ssh_forward_agent_ws=True, ssh_agent_forward_port=18765),
+            client=FakeClient(),
+            spawn=Harness().spawn,
+            probe=Harness().probe,
+            backoff_base=0.05,
+        )
+        optin_text = optin._config_text(TOKEN)
+        optin_lines = localforward_lines(optin_text)
+        ok = check("opt-in agent forward adds a third LocalForward line",
+                   len(optin_lines) == 3, f"count={len(optin_lines)}")
+        failures += 0 if ok else 1
+
+        ok = check("opt-in agent forward maps 127.0.0.1:18765 -> 127.0.0.1:8765",
+                   f"LocalForward 127.0.0.1:18765 127.0.0.1:{AGENT_PORT}" in optin_text
+                   and f"127.0.0.1:{AGENT_PORT} 127.0.0.1:{AGENT_PORT}" not in optin_text,
+                   str(optin_lines))
+        failures += 0 if ok else 1
+
+        ok = run_ssh_parse_check(optin_text, "real `ssh -G` accepts the opt-in config")
+        failures += 0 if ok else 1
+
+        # --- 3d. the guard: local agent port == AGENT_WS_PORT is loud ---------
+        collide = SSHTunnel(
+            make_settings(ssh_forward_agent_ws=True, ssh_agent_forward_port=AGENT_PORT),
+            client=FakeClient(),
+            spawn=Harness().spawn,
+            probe=Harness().probe,
+            backoff_base=0.05,
+        )
+        try:
+            collide._config_text(TOKEN)
+        except ValueError as exc:
+            ok = check("colliding SSH_AGENT_FORWARD_PORT raises ValueError",
+                       "AGENT_WS_PORT" in str(exc), str(exc)[:120])
+        except Exception as exc:  # pragma: no cover - wrong exception type
+            ok = check("colliding SSH_AGENT_FORWARD_PORT raises ValueError",
+                       False, f"raised {type(exc).__name__}")
+        else:
+            ok = check("colliding SSH_AGENT_FORWARD_PORT raises ValueError",
+                       False, "no error raised")
         failures += 0 if ok else 1
 
         # Defensive parse: a spec without the expected 4 parts must raise at
@@ -505,7 +559,7 @@ async def main() -> int:
 
         ok = check("status() reports running with a pid and forwards",
                    snapshot["running"] is True and isinstance(snapshot["pid"], int)
-                   and len(snapshot["forwards"]) == 3,
+                   and len(snapshot["forwards"]) == 2,
                    f"pid={snapshot['pid']} forwards={snapshot['forwards']}")
         failures += 0 if ok else 1
 
